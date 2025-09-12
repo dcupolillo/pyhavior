@@ -1,0 +1,44 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.so
+*.dll
+*.pyd
+
+# Virtual environment
+venv/
+.env/
+
+# Spyder project settings
+.spyderproject
+.spyproject/
+.spyderworkspace
+
+# VS Code settings
+.vscode/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Python egg files
+dist/
+build/
+*.egg-info/
+
+
+# Logs
+*.log
+
+# Images
+*.png
+
+# Arduino build files
+*.hex
+*.elf
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Local
+data/
