@@ -12,7 +12,7 @@ behavioral protocols and save videos.
 
 __version__ = "0.1.0"
 
-from gui.gui import run_app
+from .gui.gui import run_app
 
 import sys
 from pathlib import Path

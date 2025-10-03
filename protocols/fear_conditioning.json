@@ -1,0 +1,138 @@
+{
+  "protocol_name": "Fear Conditioning",
+  "duration": 300,
+  "description": "Fear conditioning protocol with 5 tone-shock pairings at 60-second intervals. Each pairing consists of a 10-second tone with a 1-second shock occurring in the final second of the tone.",
+  "parameters": {
+    "tone_duration": 10,
+    "shock_duration": 1,
+    "intertone_interval": 60,
+    "n_pairings": 5,
+    "shock_delay": 9
+  },
+  "devices_used": [
+    "tone",
+    "shock"
+  ],
+  "sequence": [
+    {
+      "time": 60.0,
+      "device": "tone",
+      "action": "ON",
+      "description": "TONE 1 ON"
+    },
+    {
+      "time": 69.0,
+      "device": "shock",
+      "action": "ON",
+      "description": "SHOCK 1 ON"
+    },
+    {
+      "time": 70.0,
+      "device": "shock",
+      "action": "OFF",
+      "description": "SHOCK 1 OFF"
+    },
+    {
+      "time": 70.0,
+      "device": "tone",
+      "action": "OFF",
+      "description": "TONE 1 OFF"
+    },
+    {
+      "time": 108.0,
+      "device": "tone",
+      "action": "ON",
+      "description": "TONE 2 ON"
+    },
+    {
+      "time": 117.0,
+      "device": "shock",
+      "action": "ON",
+      "description": "SHOCK 2 ON"
+    },
+    {
+      "time": 118.0,
+      "device": "shock",
+      "action": "OFF",
+      "description": "SHOCK 2 OFF"
+    },
+    {
+      "time": 118.0,
+      "device": "tone",
+      "action": "OFF",
+      "description": "TONE 2 OFF"
+    },
+    {
+      "time": 156.0,
+      "device": "tone",
+      "action": "ON",
+      "description": "TONE 3 ON"
+    },
+    {
+      "time": 165.0,
+      "device": "shock",
+      "action": "ON",
+      "description": "SHOCK 3 ON"
+    },
+    {
+      "time": 166.0,
+      "device": "shock",
+      "action": "OFF",
+      "description": "SHOCK 3 OFF"
+    },
+    {
+      "time": 166.0,
+      "device": "tone",
+      "action": "OFF",
+      "description": "TONE 3 OFF"
+    },
+    {
+      "time": 204.0,
+      "device": "tone",
+      "action": "ON",
+      "description": "TONE 4 ON"
+    },
+    {
+      "time": 213.0,
+      "device": "shock",
+      "action": "ON",
+      "description": "SHOCK 4 ON"
+    },
+    {
+      "time": 214.0,
+      "device": "shock",
+      "action": "OFF",
+      "description": "SHOCK 4 OFF"
+    },
+    {
+      "time": 214.0,
+      "device": "tone",
+      "action": "OFF",
+      "description": "TONE 4 OFF"
+    },
+    {
+      "time": 252.0,
+      "device": "tone",
+      "action": "ON",
+      "description": "TONE 5 ON"
+    },
+    {
+      "time": 261.0,
+      "device": "shock",
+      "action": "ON",
+      "description": "SHOCK 5 ON"
+    },
+    {
+      "time": 262.0,
+      "device": "shock",
+      "action": "OFF",
+      "description": "SHOCK 5 OFF"
+    },
+    {
+      "time": 262.0,
+      "device": "tone",
+      "action": "OFF",
+      "description": "TONE 5 OFF"
+    }
+  ]
+}

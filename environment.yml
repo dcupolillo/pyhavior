@@ -1,0 +1,14 @@
+name: pyhavior-env
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pyqt=5
+  - numpy
+  - opencv
+  - pyserial
+  - pip
+  - pip:
+      - pyqt5
+      - pyqt5-tools

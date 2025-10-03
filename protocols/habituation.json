@@ -1,0 +1,10 @@
+{
+  "protocol_name": "Habituation",
+  "duration": 300,
+  "description": "Simple habituation protocol - no stimuli, just recording baseline behavior for 5 minutes",
+  "parameters": {
+    "baseline_duration": 300
+  },
+  "devices_used": [],
+  "sequence": []
+}
