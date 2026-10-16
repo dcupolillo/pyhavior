@@ -47,11 +47,7 @@ class SelectCameraDialog(QDialog):
         available_cameras = []
         
         for i in range(6):
-            # Try DirectShow first (better for industrial cameras like uEye)
-            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-            if not cap.isOpened():
-                # Fallback to default backend
-                cap = cv2.VideoCapture(i)
+            cap = cv2.VideoCapture(i)
             
             if cap.isOpened():
                 # Try to read a frame to verify camera works

@@ -305,8 +305,6 @@ def _get_available_protocols():
             # Running in normal Python environment
             protocols_dir = Path(__file__).parent.parent / "protocols"
         
-        print(f"Looking for protocols in: {protocols_dir}")  # Debug
-        
         if not protocols_dir.exists():
             print(f"Protocols directory not found: {protocols_dir}")  # Debug
             return []
@@ -315,8 +313,7 @@ def _get_available_protocols():
         protocols = []
         for json_file in protocols_dir.glob("*.json"):
             protocols.append(json_file.stem)  # filename without .json extension
-            
-        print(f"Found protocols: {protocols}")  # Debug
+
         return sorted(protocols)
         
     except Exception as e:

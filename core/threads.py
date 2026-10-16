@@ -31,12 +31,16 @@ class VideoThread(QThread):
         self.cap = None
 
     def run(self) -> None:
-        
-        # Use DirectShow backend for uEye camera compatibility
-        self.cap = cv2.VideoCapture(self.capture_device, cv2.CAP_DSHOW)
+
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+
+        self.cap = cv2.VideoCapture(self.capture_device)
+
         if not self.cap.isOpened():
-            # Fallback to default backend
-            self.cap = cv2.VideoCapture(self.capture_device)
+                self.error_occurred.emit("Cannot open uEye camera")
+                return
 
         while self.running:
 
@@ -51,14 +55,8 @@ class VideoThread(QThread):
         if self.cap:
             self.cap.release()
 
-    def start_video(
-            self,
-            save: bool = False,
-            output: str = None
-    ) -> None:
+    def start_video(self) -> None:
 
-        self.save = save
-        self.output = str(output) if output else None
         self.start()
 
     def stop_video(self) -> None:
@@ -103,27 +101,33 @@ class RecordingVideoThread(QThread):
         self.cap = None
         self.video_writer = None
         self.video_path = None
-        self.fps = 30
+        self.fps = 25
         self.frame_width = 0
         self.frame_height = 0
-        self.imageio_writer = None  # imageio video writer
         self.imageio_writer = None  # imageio video writer
         self.frames_buffer = []  # Store frames in memory as fallback
         self.use_frame_buffer = False
         
     def run(self) -> None:
+
+        # Set higher thread priority for stable video recording
+        # once thread is running, safe to set priority
+        self.setPriority(QThread.HighPriority)
         
         try:
-            # Use DirectShow backend for better industrial camera support (uEye UI-122xLE)
-            self.cap = cv2.VideoCapture(self.capture_device, cv2.CAP_DSHOW)
-            
-            if not self.cap.isOpened():
-                # Fallback to default backend if DirectShow fails
-                self.cap = cv2.VideoCapture(self.capture_device)
+            # free up camera from previous use
+            if self.cap is not None:
+                self.cap.release()
+                self.cap = None
+
+            self.cap = cv2.VideoCapture(self.capture_device)
                 
             if not self.cap.isOpened():
                 self.error_occurred.emit("Cannot open uEye camera")
                 return
+            
+            # Set buffer size to 1 to get the most recent frame and reduce latency
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             
             self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -152,7 +156,8 @@ class RecordingVideoThread(QThread):
                     fps=self.fps,
                     codec='libx264',  # Widely supported H.264 codec
                     quality=8,  # Good quality (scale 1-10)
-                    pixelformat='yuv420p'  # Compatible with most players
+                    pixelformat='yuv420p',  # Standard format, better compatibility
+                    # macro_block_size=None  # Let ffmpeg decide optimal settings
                 )
                 
             except Exception as e:
@@ -186,11 +191,9 @@ class RecordingVideoThread(QThread):
                     # Write clean frame to file using imageio (without overlays for better recording quality)
                     if self.imageio_writer:
                         # Convert BGR to RGB (imageio expects RGB)
-                        frame_rgb = cv2.cvtColor(frame_flipped, cv2.COLOR_BGR2RGB)
-                        self.imageio_writer.append_data(frame_rgb)
-                        
+                        frame_gray = cv2.cvtColor(frame_flipped, cv2.COLOR_BGR2GRAY)
+                        self.imageio_writer.append_data(frame_gray)
 
-                    
                     # Add text overlays only for display (every 3rd frame to reduce overhead)
                     if frame_number % 3 == 0:
                         display_frame = frame_flipped.copy()
@@ -249,8 +252,6 @@ class RecordingVideoThread(QThread):
         
     def start_recording(self):
         self.running = True
-        # Set higher thread priority for stable video recording
-        self.setPriority(QThread.HighPriority)
         self.start()
         
     def stop_recording(self):

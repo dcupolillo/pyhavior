@@ -10,7 +10,9 @@ info = [
     'Treatment']
 
 # List of possible Genotypes
-genotype_list = ['FosTrap2']
+genotype_list = [
+    'C57BL6nj',
+    'FosTrap2']
 
 # List of treatments
 treatment_list = [
