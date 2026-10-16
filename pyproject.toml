@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyhavior"
+version = "0.1.0"
+description = "Python tools to control a conditioning cage and record animal behavior"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "PyQt5",
+    "pyserial",
+]
+
+[tool.setuptools]
+packages = [
+    "pyhavior",
+    "pyhavior.core",
+    "pyhavior.core.test_utils",
+    "pyhavior.gui",
+    "pyhavior.gui.buttons",
+    "pyhavior.gui.dialogs",
+    "pyhavior.gui.frames",
+    "pyhavior.gui.windows",
+]
+
+[tool.setuptools.package-dir]
+pyhavior = "."
+"pyhavior.core" = "core"
+"pyhavior.core.test_utils" = "core/test_utils"
+"pyhavior.gui" = "gui"
+"pyhavior.gui.buttons" = "gui/buttons"
+"pyhavior.gui.dialogs" = "gui/dialogs"
+"pyhavior.gui.frames" = "gui/frames"
+"pyhavior.gui.windows" = "gui/windows"
+
+[tool.setuptools.package-data]
+pyhavior = ["protocols/*.json"]
