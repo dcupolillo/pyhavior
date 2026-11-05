@@ -5,6 +5,8 @@ from pathlib import Path
 from PyQt5 import QtCore
 from PyQt5.QtWidgets import QFrame, QGridLayout, QLabel, QLineEdit
 
+_UNSET = object()  # "argument not given", as opposed to None (= disabled)
+
 
 class InfoDisplayFrame(QFrame):
     """Frame to display mouse information and video metadata."""
@@ -126,16 +128,27 @@ class InfoDisplayFrame(QFrame):
         self.experiment_edit.setText(data.get('Behavior test', 'Not set'))
         self.treatment_edit.setText(data.get('Treatment', 'Not set'))
         
-    def update_hardware_info(self, com_port: str = None, camera_device: int = None) -> None:
-        """Update the displayed hardware configuration"""
-        if com_port is not None:
-            self.com_port_edit.setText(com_port)
-        if camera_device is not None:
-            self.camera_device_edit.setText(f"Camera {camera_device}")
+    def update_hardware_info(
+            self,
+            com_port=_UNSET,
+            camera_device=_UNSET
+    ) -> None:
+        """Update the displayed hardware configuration.
+
+        Arguments left out are not changed; `None` means the device is
+        disabled (dry run / no video).
+        """
+        if com_port is not _UNSET:
+            self.com_port_edit.setText(
+                'Disabled (dry run)' if com_port is None else com_port)
+        if camera_device is not _UNSET:
+            self.camera_device_edit.setText(
+                'Disabled (no video)' if camera_device is None
+                else f"Camera {camera_device}")
         
     def update_video_metadata(self, metadata: dict) -> None:
         """Update the displayed video metadata during recording"""
-        video_path = metadata.get('video_path', 'Unknown')
+        video_path = metadata.get('video_path') or 'Unknown'
         if video_path != 'Unknown':
             filename = Path(video_path).name
             self.video_path_edit.setText(filename)
