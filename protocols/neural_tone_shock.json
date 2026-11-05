@@ -1,0 +1,43 @@
+{
+  "protocol_name": "Neural Tone Shock",
+  "duration": 300,
+  "description": "TTL (green LED pin) starts neural recording at 10 s. Then 5 tones (5 s, 25 s apart) followed by 5 unsignalled shocks (1 s, 25 s apart), with a long pre-onset baseline for each.",
+  "parameters": {
+    "ttl_time": 10,
+    "ttl_duration": 0.5,
+    "tone_duration": 5,
+    "n_tones": 5,
+    "shock_duration": 1,
+    "n_shocks": 5,
+    "interval": 25
+  },
+  "devices_used": ["green_led", "tone", "shock"],
+  "sequence": [
+    {"time": 10.0,  "device": "green_led", "action": "ON",  "description": "RECORDING TTL ON"},
+    
+
+    {"time": 40.0,  "device": "tone", "action": "ON",  "description": "TONE 1 ON"},
+    {"time": 45.0,  "device": "tone", "action": "OFF", "description": "TONE 1 OFF"},
+    {"time": 65.0,  "device": "tone", "action": "ON",  "description": "TONE 2 ON"},
+    {"time": 70.0,  "device": "tone", "action": "OFF", "description": "TONE 2 OFF"},
+    {"time": 90.0,  "device": "tone", "action": "ON",  "description": "TONE 3 ON"},
+    {"time": 95.0,  "device": "tone", "action": "OFF", "description": "TONE 3 OFF"},
+    {"time": 115.0, "device": "tone", "action": "ON",  "description": "TONE 4 ON"},
+    {"time": 120.0, "device": "tone", "action": "OFF", "description": "TONE 4 OFF"},
+    {"time": 140.0, "device": "tone", "action": "ON",  "description": "TONE 5 ON"},
+    {"time": 145.0, "device": "tone", "action": "OFF", "description": "TONE 5 OFF"},
+
+    {"time": 180.0, "device": "shock", "action": "ON",  "description": "SHOCK 1 ON"},
+    {"time": 181.0, "device": "shock", "action": "OFF", "description": "SHOCK 1 OFF"},
+    {"time": 205.0, "device": "shock", "action": "ON",  "description": "SHOCK 2 ON"},
+    {"time": 206.0, "device": "shock", "action": "OFF", "description": "SHOCK 2 OFF"},
+    {"time": 230.0, "device": "shock", "action": "ON",  "description": "SHOCK 3 ON"},
+    {"time": 231.0, "device": "shock", "action": "OFF", "description": "SHOCK 3 OFF"},
+    {"time": 255.0, "device": "shock", "action": "ON",  "description": "SHOCK 4 ON"},
+    {"time": 256.0, "device": "shock", "action": "OFF", "description": "SHOCK 4 OFF"},
+    {"time": 280.0, "device": "shock", "action": "ON",  "description": "SHOCK 5 ON"},
+    {"time": 281.0, "device": "shock", "action": "OFF", "description": "SHOCK 5 OFF"},
+
+    {"time": 282.0,  "device": "green_led", "action": "OFF", "description": "RECORDING TTL OFF"}
+  ]
+}
