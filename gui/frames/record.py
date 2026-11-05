@@ -1,6 +1,3 @@
-""" Created on Mon Nov 27 15:39:53 2023
-    @author: dcupolillo """
-
 import json
 import time
 from datetime import date
@@ -8,20 +5,40 @@ from pathlib import Path
 
 from PyQt5 import QtCore
 from PyQt5.QtWidgets import QFrame, QGridLayout, QLabel, QPushButton, QMessageBox
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import pyqtSignal, QTimer
 
 from pyhavior.core import ProtocolRunner, AVAILABLE_PROTOCOLS
+from pyhavior.core.arduino import ArduinoBoard
+from pyhavior.core.camera import Camera
+from pyhavior.core.clock import SessionClock
 from pyhavior.core.threads import SerialThread, RecordingVideoThread
 from pyhavior.gui.dialogs import EnterInfoDialog, EnterCOMDialog
-from pyhavior.gui.windows import RecordingWindow
+from pyhavior.gui.windows import RecordingWindow, SessionWindow
 
 
 class RecordFrame(QFrame):
-    """Frame with functionalities for saving and recording."""
+    """
+    Frame with functionalities for saving and recording.
+
+    It is also the session controller. A session goes through four phases:
+
+    - idle: nothing is running.
+    - preparing: the workers open their devices and report `ready`.
+    - running: the shared `SessionClock` has started; the protocol and the
+      video recording run against it.
+    - stopping: the clock is stopped; waiting for the workers to finish.
+
+    The session ends when the protocol finishes (or on user stop / error),
+    never because of the video. `com_port=None` runs the protocol on a
+    dry-run board (no Arduino) and `camera_device=None` records no video.
+    """
 
     # Ensure UI updates from worker threads are marshaled to the GUI thread
     stop_enabled = pyqtSignal(bool)
     show_error = pyqtSignal(str, str)
+    session_active = pyqtSignal(bool)  # True from session start to the end of finalizing
+
+    PREPARE_TIMEOUT_MS = 20000
 
     def __init__(
             self,
@@ -37,8 +54,8 @@ class RecordFrame(QFrame):
         self.init_buttons()
         self.init_attributes()
 
-        self.com_port = default_com_port
-        self.camera_device = 0  # Default camera device
+        self.com_port = default_com_port  # None = no Arduino (dry run)
+        self.camera_device = 0  # None = no video
 
         # Updated to use ProtocolRunner for sequence-based protocols only
         self.experiment_classes = {}
@@ -57,16 +74,21 @@ class RecordFrame(QFrame):
         
         save_frame.dest_folder.connect(self.handle_dest_folder)
 
-        self.is_recording = False
-        self.recording_thread = None
-        self.serial_thread = None
-        self.recording_window = None
-        
-        # Initialize recording metadata attributes
-        self.fps = 30
-        self.frame_width = 640
-        self.frame_height = 480
-        self.video_path = None
+        self.protocol = None
+        self._phase = 'idle'
+        # Kept after a session ends (as a summary) until the next one starts
+        self.session_window = None
+        # Set by the settings frame: returns why a device is busy, or None
+        self.hardware_busy = None
+        self._reset_session_state()
+
+        # Destination folder and mouse info must not change mid-session
+        self.session_active.connect(
+            lambda active: save_frame.setEnabled(not active))
+
+        self._prepare_timer = QTimer(self)
+        self._prepare_timer.setSingleShot(True)
+        self._prepare_timer.timeout.connect(self._on_prepare_timeout)
         
         # Store reference to info display frame
         self.info_display_frame = info_display_frame
@@ -81,6 +103,29 @@ class RecordFrame(QFrame):
         # Connect stop_enabled signal to update UI
         self.stop_enabled.connect(self.stop_button.setEnabled)
         self.show_error.connect(self.display_error_message)
+
+    @property
+    def is_recording(self) -> bool:
+        return self._phase != 'idle'
+
+    def _reset_session_state(self) -> None:
+        """Forget everything about the previous session."""
+
+        self.clock = None
+        self.board = None
+        self.camera = None
+        self.serial_thread = None
+        self.recording_thread = None
+        self.recording_window = None
+        self.arduino_log_path = None
+
+        self._pending = set()  # workers that have not reported ready yet
+        self._serial_done = True
+        self._video_done = True
+        self._user_stopped = False
+        self._video_first_t = None  # session time of the first video frame
+        self._video_error = None
+        self._t_stop = None  # session time at which the session was ended
 
     def init_attributes(self) -> None:
         
@@ -124,6 +169,14 @@ class RecordFrame(QFrame):
         if self.info_display_frame:
             self.info_display_frame.update_hardware_info(com_port=self.com_port)
 
+    def handle_no_arduino(self) -> None:
+        """Run sessions on a dry-run board (no Arduino attached)."""
+
+        self.com_port = None
+        print("Arduino disabled: protocols will run as a dry run")
+        if self.info_display_frame:
+            self.info_display_frame.update_hardware_info(com_port=None)
+
     def handle_camera_selection(
             self,
             camera_device: int
@@ -135,6 +188,14 @@ class RecordFrame(QFrame):
         # Update info display with camera device
         if self.info_display_frame:
             self.info_display_frame.update_hardware_info(camera_device=self.camera_device)
+
+    def handle_no_camera(self) -> None:
+        """Run sessions without recording video."""
+
+        self.camera_device = None
+        print("Camera disabled: sessions will run without video")
+        if self.info_display_frame:
+            self.info_display_frame.update_hardware_info(camera_device=None)
 
     def handle_info(
             self,
@@ -189,64 +250,307 @@ class RecordFrame(QFrame):
         msg_box.setText(message)
         msg_box.exec_()
         
-    def on_recording_finished(self) -> None:
-        """Handle recording completion"""
-        
-        self.is_recording = False
-        self.record_button.setEnabled(True)  # Re-enable record button
+    # ------------------------------------------------------------------
+    # Session control
+    # ------------------------------------------------------------------
+
+    def start_recording(self) -> None:
+        """Build the clock and the workers, and start the prepare phase."""
+
+        if self.is_recording:
+            print("Recording is already in progress.")
+            return
+
+        busy = self.hardware_busy() if self.hardware_busy else None
+        if busy:
+            self.show_error.emit("Device in use", busy)
+            return
+
+        # A fresh protocol per session: a stopped runner cannot be reused
+        try:
+            self.init_protocol()
+        except Exception as e:
+            self.show_error.emit("Protocol Error", str(e))
+            return
+
+        self._close_session_window()
+        self._reset_session_state()
+
+        base = Path(self.filename)
+        stem = f"{base.stem}_{time.strftime('%H%M%S')}"
+
+        self.clock = SessionClock()
+
+        # No COM port means no Arduino: the protocol runs on a dry-run board
+        self.board = ArduinoBoard(self.com_port, self.clock)
+        self.arduino_log_path = base.with_name(f"{stem}_arduino.csv")
+
+        self.serial_thread = SerialThread(self.board, self.protocol, self.clock)
+        self.serial_thread.ready.connect(self._on_serial_ready)
+        self.serial_thread.error_occurred.connect(self._on_serial_error)
+        self.serial_thread.finished.connect(self._on_serial_finished)
+        self._pending.add('serial')
+        self._serial_done = False
+
+        if self.camera_device is not None:
+            self.camera = Camera(
+                self.camera_device,
+                self.clock,
+                output_path=str(base.with_name(f"{stem}.mp4")))
+
+            self.recording_thread = RecordingVideoThread(
+                self.camera, self.clock)
+            self.recording_thread.ready.connect(self._on_video_ready)
+            self.recording_thread.error_occurred.connect(self._on_video_error)
+            self.recording_thread.recording_metadata.connect(
+                self.on_recording_metadata)
+            self.recording_thread.first_frame.connect(self._on_first_frame)
+            self.recording_thread.finished.connect(self._on_video_finished)
+            self._pending.add('video')
+            self._video_done = False
+
+            self.recording_window = RecordingWindow(
+                self.data['Mouse ID'],
+                self.data['Behavior test'])
+            self.recording_thread.frame_recorded.connect(
+                self.recording_window.display_frame)
+            # The video window is only a preview: closing it does not stop the session
+            self.recording_window.recording_window_closed.connect(
+                self._on_video_window_closed)
+            self.recording_window.show()
+
+        self.session_window = SessionWindow(
+            self.clock,
+            self.protocol,
+            self.data['Mouse ID'],
+            arduino_text=(
+                self.com_port if self.com_port else 'dry run (no Arduino)'),
+            video_text='starting...' if self.camera else 'off (no camera)')
+        self.session_window.stop_requested.connect(self.stop_recording)
+        self.session_window.show()
+
+        self._phase = 'preparing'
+        self.record_button.setEnabled(False)
+        self.stop_enabled.emit(True)
+        self.session_active.emit(True)
+        self._prepare_timer.start(self.PREPARE_TIMEOUT_MS)
+
+        if self.recording_thread:
+            self.recording_thread.start_recording()
+        self.serial_thread.start()
+
+    def _worker_ready(self, name: str) -> None:
+
+        if self._phase != 'preparing':
+            return
+        self._pending.discard(name)
+        if not self._pending:
+            self._begin_session()
+
+    def _begin_session(self) -> None:
+        """All workers are ready: start the clock for everyone at once."""
+
+        self._prepare_timer.stop()
+        self._phase = 'running'
+        self.clock.start()
+        self.session_window.set_phase('running')
+        if self.camera:
+            self.session_window.set_video_status('recording')
+
+        started = time.strftime(
+            '%Y-%m-%d %H:%M:%S', time.localtime(self.clock.t0_wall))
+        print(f"Session started: {started} "
+              f"(duration {self.protocol.duration}s, "
+              f"arduino: {self.com_port or 'dry run'}, "
+              f"video: {'yes' if self.camera else 'no'})")
+
+    def _end_session(self) -> None:
+        """Stop the clock and every worker. Safe to call repeatedly."""
+
+        if self._phase in ('idle', 'stopping'):
+            return
+
+        self._prepare_timer.stop()
+        if self.clock.started:
+            self._t_stop = self.clock.now()
+        self._phase = 'stopping'
+        self.session_window.set_phase('stopping')
+        self.protocol.request_stop()
+        self.clock.stop()
+        self._try_finalize()
+
+    def _try_finalize(self) -> None:
+
+        if (self._phase == 'stopping'
+                and self._serial_done and self._video_done):
+            self._finalize()
+
+    def _finalize(self) -> None:
+        """Close everything, save the session files and reset the UI."""
+
+        self._prepare_timer.stop()
+        self._close_recording_window()
         self.stop_enabled.emit(False)
-        
-        if self.recording_window:
-            self.recording_window.close()
-            self.recording_window = None
-        
-        # Clear video metadata from info display
+
+        for thread in (self.serial_thread, self.recording_thread):
+            if thread:
+                thread.wait(2000)
+
+        if self.clock.started:
+            try:
+                self.board.save_log(str(self.arduino_log_path))
+            except Exception as e:
+                print(f"Could not save the Arduino log: {e}")
+            try:
+                self.save_data_to_json()
+            except Exception as e:
+                self.show_error.emit(
+                    "Save Error", f"Could not save session metadata: {e}")
+            self._report_video()
+        else:
+            self._discard_empty_video()
+
         if self.info_display_frame:
             self.info_display_frame.clear_video_metadata()
-        
-        # Stop the serial thread if it's still running
-        if self.serial_thread and self.serial_thread.isRunning():
-            self.protocol.request_stop()
-            self.serial_thread.stop()
-            self.serial_thread.wait()  # Wait for thread to finish
-            print("Serial thread stopped.")
-        
-        # Verify video file and save metadata
-        if hasattr(self, 'video_start_time') and hasattr(self, 'serial_start_time'):
-            self.save_data_to_json()
-        
-        # Check if video file was created successfully
-        if self.video_path and Path(self.video_path).exists():
-            file_size = Path(self.video_path).stat().st_size
-            print(f"Video saved: {self.video_path} (Size: {file_size:,} bytes)")
-            if file_size < 1000:  # Very small file might be corrupted
-                print("Warning: Video file is very small and might be corrupted")
-        else:
-            print("Warning: Video file was not created or is missing")
-        
+
+        self._phase = 'idle'
+        self.record_button.setEnabled(True)
+        self.session_active.emit(False)
+
+        if self.session_window:
+            if not self.clock.started:
+                note = 'Aborted'
+            elif self._user_stopped:
+                note = 'Stopped by user'
+            else:
+                note = 'Finished'
+            self.session_window.set_phase('finished', note)
+
         print(f"Recording finished at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        
-    def on_recording_error(
+
+    def stop_recording(self) -> None:
+        """Ask the user for confirmation and stop the session."""
+
+        if self._phase not in ('preparing', 'running'):
+            return
+
+        response = QMessageBox.question(
             self,
-            error_message: str
-    ) -> None:
-        """Handle recording errors"""
-    
-        print(f"Recording error: {error_message}")
-        self.record_button.setEnabled(True)  # Re-enable record button on error
-        self.show_error.emit("Recording Error", error_message)
-        self.stop_recording()
-        
+            'Stop Recording',
+            "Recording is in progress. Are you sure you want to stop?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No)
+
+        if response == QMessageBox.Yes and self._phase in ('preparing', 'running'):
+            self._user_stopped = True
+            self._end_session()
+        else:
+            print("Recording continues.")
+
+    def shutdown(self) -> None:
+        """Non-interactive stop that blocks until the files are closed."""
+
+        if self._phase == 'idle':
+            self._close_session_window()
+            return
+
+        self._user_stopped = True
+        self._end_session()
+
+        for thread in (self.serial_thread, self.recording_thread):
+            if thread and not thread.wait(10000):
+                print("Warning: a worker thread did not stop in time")
+
+        self._serial_done = True
+        self._video_done = True
+        self._try_finalize()
+        self._close_session_window()
+
+    def _on_prepare_timeout(self) -> None:
+
+        if self._phase != 'preparing':
+            return
+        missing = ', '.join(sorted(self._pending))
+        self.show_error.emit(
+            "Session Error", f"Timed out waiting for: {missing}.")
+        self._end_session()
+
+    # ------------------------------------------------------------------
+    # Worker signals
+    # ------------------------------------------------------------------
+
+    def _on_serial_ready(self) -> None:
+        self._worker_ready('serial')
+
+    def _on_video_ready(self) -> None:
+        self._worker_ready('video')
+
+    def _on_serial_error(self, message: str) -> None:
+
+        print(f"Arduino error: {message}")
+        if self._phase in ('preparing', 'running'):
+            self.show_error.emit("Arduino Error", message)
+            self._end_session()
+
+    def _on_video_error(self, message: str) -> None:
+
+        print(f"Video error: {message}")
+
+        if self._phase == 'preparing' and 'video' in self._pending:
+            # The camera is optional: let the user decide
+            self._prepare_timer.stop()
+            response = QMessageBox.question(
+                self,
+                'Camera unavailable',
+                f"{message}\n\nContinue the session without video?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No)
+
+            if self._phase != 'preparing':
+                return  # the session ended while the dialog was open
+
+            if response == QMessageBox.Yes:
+                self._video_error = message
+                self._pending.discard('video')
+                self.camera = None
+                self.session_window.set_video_status(
+                    f'off (camera unavailable: {message})')
+                self._close_recording_window()
+                self._prepare_timer.start(self.PREPARE_TIMEOUT_MS)
+                if not self._pending:
+                    self._begin_session()
+            else:
+                self._end_session()
+
+        elif self._phase == 'running':
+            # The protocol is not affected: keep going without video
+            self._video_error = message
+            self.session_window.set_video_status(f'lost: {message}')
+            self.show_error.emit(
+                "Video Error",
+                f"{message}\n\nThe session continues without video.")
+
+    def _on_first_frame(self, t: float) -> None:
+        self._video_first_t = t
+
+    def _on_serial_finished(self) -> None:
+        """The protocol is over (duration, user stop or error)."""
+
+        self._serial_done = True
+        self._end_session()
+        self._try_finalize()
+
+    def _on_video_finished(self) -> None:
+        """The video is over; this never ends the session by itself."""
+
+        self._video_done = True
+        self._try_finalize()
+
     def on_recording_metadata(
             self,
             metadata: dict
     ) -> None:
         """Handle recording metadata from RecordingVideoThread"""
-        
-        self.video_path = metadata.get('video_path')
-        self.fps = metadata.get('fps', 30)
-        self.frame_width = metadata.get('frame_width', 640)
-        self.frame_height = metadata.get('frame_height', 480)
         
         # Print metadata properly
         print("Recording metadata:")
@@ -257,88 +561,64 @@ class RecordFrame(QFrame):
         if self.info_display_frame:
             self.info_display_frame.update_video_metadata(metadata)
 
-    def start_recording(self) -> None:
-        
-        if not self.is_recording:
-            
-            self.serial_start_time = time.time()
-            self.video_start_time = time.time()
-            
-            ts_serial = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.serial_start_time))
-            ts_video = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.video_start_time))
-            print(f'Serial start: {ts_serial}')
-            print(f'Video start: {ts_video}')
-            
-            # Start serial thread
-            self.serial_thread = SerialThread(self.com_port, self.protocol)
-            self.serial_thread.start()
-            
-            # Start recording thread
-            self.recording_thread = RecordingVideoThread(
-                str(self.filename),
-                self.protocol.duration,
-                self.data,
-                capture_device=self.camera_device,
-                parent=self
-            )
-            
-            # Create and show recording window
-            self.recording_window = RecordingWindow(
-                self.data['Mouse ID'], 
-                self.data['Behavior test']
-            )
-            self.recording_window.show()
-            
-            # Connect signals
-            self.recording_thread.recording_finished.connect(self.on_recording_finished)
-            self.recording_thread.error_occurred.connect(self.on_recording_error)
-            self.recording_thread.recording_metadata.connect(self.on_recording_metadata)
-            self.recording_thread.frame_recorded.connect(self.recording_window.display_frame)
-            self.recording_window.recording_window_closed.connect(self.stop_recording)
-            
-            self.is_recording = True
-            self.record_button.setEnabled(False)  # Disable record button during recording
-            self.stop_enabled.emit(True)
-            self.recording_thread.start_recording()
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _on_video_window_closed(self) -> None:
+        """The video window is a preview: stop feeding it, keep recording."""
+
+        if self.recording_thread and self.recording_window:
+            try:
+                self.recording_thread.frame_recorded.disconnect(
+                    self.recording_window.display_frame)
+            except TypeError:
+                pass
+
+    def _close_recording_window(self) -> None:
+
+        if self.recording_window:
+            # Closing it programmatically must not trigger the handler
+            try:
+                self.recording_window.recording_window_closed.disconnect(
+                    self._on_video_window_closed)
+            except TypeError:
+                pass
+            self.recording_window.close()
+            self.recording_window = None
+
+    def _close_session_window(self) -> None:
+
+        if self.session_window:
+            self.session_window.force_close()
+            self.session_window = None
+
+    def _report_video(self) -> None:
+
+        if not self.camera or not self.camera.video_path:
+            return
+
+        video = Path(self.camera.video_path)
+        if video.exists():
+            file_size = video.stat().st_size
+            print(f"Video saved: {video} (Size: {file_size:,} bytes, "
+                  f"{self.camera.n_frames_written} frames)")
+            if file_size < 1000:  # Very small file might be corrupted
+                print("Warning: Video file is very small and might be corrupted")
         else:
-            print("Recording is already in progress.")
+            print("Warning: Video file was not created or is missing")
 
-    def stop_recording(self) -> None:
-        
-        if self.is_recording:
-            response = QMessageBox.question(
-                self,
-                'Stop Recording',
-                "Recording is in progress. Are you sure you want to stop?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-            if response == QMessageBox.Yes:
+    def _discard_empty_video(self) -> None:
+        """Remove the files of a session that never started."""
 
-                # Stop threads properly to prevent file corruption
-                if self.recording_thread:
-                    print("Stopping recording thread...")
-                    self.recording_thread.stop_recording()
-                    # Wait for recording thread to finish before continuing
-                    if not self.recording_thread.wait(10000):  # 10 second timeout
-                        print("Warning: Recording thread did not stop in time")
-                    
-                if self.serial_thread:
-                    print("Stopping serial thread...")
-                    self.protocol.request_stop()
-                    self.serial_thread.stop()
-                    
-                self.is_recording = False
-                self.record_button.setEnabled(True)  # Re-enable record button
-                self.stop_enabled.emit(False)
-                
-                # Save metadata after ensuring threads have stopped
-                if hasattr(self, 'video_start_time') and hasattr(self, 'serial_start_time'):
-                    self.save_data_to_json()
-                
-                print("Recording stopped successfully.")
-            else:
-                print("Recording continues.")
+        if not self.camera or self.camera.n_frames_written:
+            return
+        for path in (self.camera.video_path, self.camera.timestamps_path):
+            try:
+                if path and Path(path).exists():
+                    Path(path).unlink()
+            except OSError as e:
+                print(f"Could not remove {path}: {e}")
 
     def save_data_to_json(self) -> None:
         """Save metadata to a .json file according to predefined formatting."""
@@ -348,27 +628,34 @@ class RecordFrame(QFrame):
         json_file_path = (
             filename_path.with_name(base_name).with_suffix('.json'))
 
-        # Use the actual video path from the recording thread if available
-        if self.video_path:
-            video_file_resolved = str(Path(self.video_path).resolve())
-        else:
-            # Fallback to constructed path
-            base = Path(self.filename)
-            ts = time.strftime('%H%M%S', time.localtime(self.video_start_time))
-            video_file_resolved = str(base.with_name(f"{base.stem}_{ts}.avi").resolve())
+        camera = self.camera
+        first = self._video_first_t
 
         experiment_data = {
             'Type': self.data['Behavior test'],
             'Date': date.today().strftime("%Y-%m-%d"),
             'Treatment': self.data['Treatment'],
-            'Video Start Time': self.video_start_time,
-            'Serial Start Time': self.serial_start_time,
-            'Video File': video_file_resolved,
-            'Camera FPS': self.fps,
-            'Frame Width': self.frame_width,
-            'Frame Height': self.frame_height,
+            'Session Start Time': self.clock.t0_wall,
+            'Session Duration': self._t_stop,
+            'Stopped By User': self._user_stopped,
+            'Serial Start Time': self.clock.t0_wall,
+            'Video Start Time': (
+                self.clock.to_wall(first) if first is not None else None),
+            'Video Start Offset': first,
+            'Video File': (
+                str(Path(camera.video_path).resolve()) if camera else None),
+            'Video Timestamps File': (
+                str(Path(camera.timestamps_path).resolve()) if camera else None),
+            'Frames Written': camera.n_frames_written if camera else None,
+            'Video Error': self._video_error,
+            'Camera FPS': camera.fps if camera else None,
+            'Frame Width': camera.frame_width if camera else None,
+            'Frame Height': camera.frame_height if camera else None,
+            'Arduino': 'None' if self.board.dry_run else self.com_port,
             'com Port': self.com_port,
-            'camera_index': self.camera_device,            
+            'Arduino Log File': str(Path(self.arduino_log_path).resolve()),
+            'Protocol Events': self.protocol.event_log,
+            'camera_index': self.camera_device if camera else None,
         }
 
         if json_file_path.exists():
