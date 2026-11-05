@@ -70,11 +70,9 @@ class Main(QMainWindow):
         """
         Handles the closing event of the main window.
         """
-        if self.record_frame.is_recording:
-            self.record_frame.stop_recording()
-            event.accept()
-        else:
-            event.accept()
+        # Also closes the session summary window left open after a session
+        self.record_frame.shutdown()
+        event.accept()
 
 
 def run_app():
