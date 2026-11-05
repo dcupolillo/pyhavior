@@ -1,15 +1,12 @@
-""" Created on Mon Apr 15 14:19:35 2024
-    @author: dcupolillo """
-
 import numpy as np
 import cv2
-import serial
 import time
 from pathlib import Path
-from PyQt5.QtCore import QThread, pyqtSignal
-from pathlib import Path
-import time
-import imageio
+from typing import Optional
+from PyQt5.QtCore import QObject, QThread, pyqtSignal
+from pyhavior.core.arduino import ArduinoBoard
+from pyhavior.core.camera import Camera, CameraPreview, CameraError
+from pyhavior.core.clock import SessionClock
 try:
     if hasattr(cv2, "utils") and hasattr(cv2.utils, "logging"):
         cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
@@ -19,6 +16,7 @@ except Exception:
 class VideoThread(QThread):
 
     frame_captured = pyqtSignal(np.ndarray)
+    error_occurred = pyqtSignal(str)
 
     def __init__(
             self,
@@ -28,232 +26,145 @@ class VideoThread(QThread):
         super().__init__()
         self.capture_device = capture_device
         self.running = False
-        self.cap = None
 
     def run(self) -> None:
 
-        if self.cap is not None:
-            self.cap.release()
-            self.cap = None
+        preview = CameraPreview(self.capture_device)
 
-        self.cap = cv2.VideoCapture(self.capture_device)
+        try:
+            preview.open()
+        except CameraError as e:
+            self.error_occurred.emit(str(e))
+            return
 
-        if not self.cap.isOpened():
-                self.error_occurred.emit("Cannot open uEye camera")
-                return
-
-        while self.running:
-
-            ret, frame = self.cap.read()
-
-            if ret:
-                frame = cv2.flip(frame, 1)
-                self.frame_captured.emit(frame)
-            else:
-                break
-
-        if self.cap:
-            self.cap.release()
+        try:
+            while self.running:
+                frame = preview.read()
+                if frame is None:
+                    if self.running:
+                        self.error_occurred.emit("Lost the connection to the camera")
+                    break
+                self.frame_captured.emit(frame.image)
+        finally:
+            preview.close()
 
     def start_video(self) -> None:
-
         self.start()
 
     def stop_video(self) -> None:
-
         self.running = False
         self.wait()
-        if self.cap:
-            self.cap.release()
 
     def start(self) -> None:
-
+        """Start the video capture thread.
+           Sets the running flag to True and calls the thread's start method."""
         self.running = True
         super().start()
 
     def stop(self) -> None:
-
+        """Stop the video capture thread.
+           Sets the running flag to False and waits for the thread to finish."""
         self.stop_video()
 
 
 class RecordingVideoThread(QThread):
     
+    """
+    Records a `Camera` on the shared session clock.
+
+    Lifecycle: `start_recording()` opens the camera (and writer) and emits
+    `ready`; the thread then waits for `clock.start()`, records until the
+    clock stops (or `stop_recording()` is called) and closes everything.
+    The thread never decides when the session ends.
+    """
+
     frame_recorded = pyqtSignal(np.ndarray)
-    recording_finished = pyqtSignal()
+    recording_finished = pyqtSignal()  # run() is over and the file is closed
     error_occurred = pyqtSignal(str)
     recording_metadata = pyqtSignal(dict)
-    
+    ready = pyqtSignal()  # camera and writer are open, waiting for the clock
+    first_frame = pyqtSignal(float)  # session time of the first frame written
+
     def __init__(
             self,
-            filename: str,
-            protocol_duration: float,
-            mouse_data: dict,
-            capture_device: int = 0,
-            parent=None
+            camera: Camera,
+            clock: SessionClock,
+            parent: QObject = None
     ) -> None:
-        
+
         super().__init__(parent)
-        self.filename = filename
-        self.protocol_duration = protocol_duration
-        self.mouse_data = mouse_data
-        self.capture_device = capture_device
+        self.camera = camera
+        self.clock = clock
         self.running = False
-        self.cap = None
-        self.video_writer = None
-        self.video_path = None
-        self.fps = 25
-        self.frame_width = 0
-        self.frame_height = 0
-        self.imageio_writer = None  # imageio video writer
-        self.frames_buffer = []  # Store frames in memory as fallback
-        self.use_frame_buffer = False
-        
+
     def run(self) -> None:
 
         # Set higher thread priority for stable video recording
         # once thread is running, safe to set priority
         self.setPriority(QThread.HighPriority)
-        
+
         try:
-            # free up camera from previous use
-            if self.cap is not None:
-                self.cap.release()
-                self.cap = None
-
-            self.cap = cv2.VideoCapture(self.capture_device)
-                
-            if not self.cap.isOpened():
-                self.error_occurred.emit("Cannot open uEye camera")
-                return
-            
-            # Set buffer size to 1 to get the most recent frame and reduce latency
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            
-            self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-            # Create timestamped filename
-            base = Path(self.filename)
-            ts = time.strftime('%H%M%S')
-            self.video_path = str(base.with_name(f"{base.stem}_{ts}.avi"))
-            
-            # Ensure .avi extension
-            if not self.video_path.lower().endswith('.avi'):
-                dot = self.video_path.rfind('.')
-                self.video_path = (self.video_path[:dot] if dot != -1 else self.video_path) + '.avi'
-            
-            # Initialize imageio video writer for reliable video recording
-            # Ensure directory exists
-            Path(self.video_path).parent.mkdir(parents=True, exist_ok=True)
-            
-            # Change to MP4 for better compatibility with imageio
-            self.video_path = str(Path(self.video_path).with_suffix('.mp4'))
-            
             try:
-                # Use imageio with ffmpeg backend for reliable video writing
-                self.imageio_writer = imageio.get_writer(
-                    self.video_path,
-                    fps=self.fps,
-                    codec='libx264',  # Widely supported H.264 codec
-                    quality=8,  # Good quality (scale 1-10)
-                    pixelformat='yuv420p',  # Standard format, better compatibility
-                    # macro_block_size=None  # Let ffmpeg decide optimal settings
-                )
-                
-            except Exception as e:
-                self.error_occurred.emit(
-                    f"Failed to initialize imageio video writer: {str(e)}\n"
-                    f"Path: {self.video_path}")
+                self.camera.open()
+            except CameraError as e:
+                self.error_occurred.emit(str(e))
                 return
-            
-            # Emit metadata for RecordFrame to use
-            metadata = {
-                'video_path': self.video_path,
-                'fps': self.fps,
-                'frame_width': self.frame_width,
-                'frame_height': self.frame_height
-            }
-            self.recording_metadata.emit(metadata)
-            
-            start_time = time.time()
-            frame_number = 0
-            frame_time = 1.0 / self.fps  # Target time per frame (0.033s for 30fps)
-            
-            while self.running and (time.time() - start_time) < self.protocol_duration:
-                
-                frame_start = time.time()
-                ret, frame = self.cap.read()
-                
-                if ret:
-                    # Flip horizontally
-                    frame_flipped = cv2.flip(frame, 1)
-                    
-                    # Write clean frame to file using imageio (without overlays for better recording quality)
-                    if self.imageio_writer:
-                        # Convert BGR to RGB (imageio expects RGB)
-                        frame_gray = cv2.cvtColor(frame_flipped, cv2.COLOR_BGR2GRAY)
-                        self.imageio_writer.append_data(frame_gray)
 
-                    # Add text overlays only for display (every 3rd frame to reduce overhead)
-                    if frame_number % 3 == 0:
-                        display_frame = frame_flipped.copy()
-                        elapsed_time = time.time() - start_time
-                        
-                        # Combine text overlays into fewer calls for better performance
-                        cv2.putText(
-                            display_frame, f'Frame={frame_number} | Time={elapsed_time:.1f}s', 
-                            (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1, cv2.LINE_AA)
-                        
-                        cv2.putText(
-                            display_frame, f"{self.mouse_data['Mouse ID']} - {self.mouse_data['Behavior test']}",
-                            (20, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1, cv2.LINE_AA)
-                        
-                        # Emit frame for PyQt display (less frequently)
-                        self.frame_recorded.emit(display_frame)
-                    
-                    frame_number += 1
-                    
-                    # Consistent timing to reduce USB load variations
-                    processing_time = time.time() - frame_start
-                    sleep_time = max(0, frame_time - processing_time)
-                    if sleep_time > 0:
-                        # Use consistent sleep to maintain steady USB data flow
-                        self.msleep(int(sleep_time * 1000))
-                    elif processing_time > frame_time:
-                        # If processing is taking too long, yield CPU briefly
-                        self.msleep(1)
-                        
-                else:
-                    # If frame capture fails, still maintain timing
-                    self.msleep(33)
-                
+            self.recording_metadata.emit(self.camera.metadata())
+            self.ready.emit()
+
+            while not self.clock.started:
+                if self.clock.stopped or not self.running:
+                    return
+                self.clock.wait_for_start(0.05)
+
+            self._record_loop()
+
         except Exception as e:
             self.error_occurred.emit(str(e))
         finally:
             self.cleanup()
             self.recording_finished.emit()
-            
-    def cleanup(self):
-        """Properly cleanup video resources to prevent file corruption"""
-        try:
-            if self.imageio_writer:
-                self.imageio_writer.close()
-                print(f"Video saved: {Path(self.video_path).name}")
-        except Exception as e:
-            print(f"Error closing video writer: {e}")
-        
-        try:
-            if self.cap:
-                self.cap.release()
-        except Exception as e:
-            print(f"Error releasing camera: {e}")
-        
-        cv2.destroyAllWindows()
-        
-    def start_recording(self):
+
+    def _record_loop(self) -> None:
+
+        frame_time = 1.0 / self.camera.fps
+        first = True
+
+        while self.running and self.clock.running:
+
+            loop_start = time.perf_counter()
+            frame = self.camera.read()
+
+            if frame is None:
+                # If frame capture fails, still maintain timing
+                self.msleep(33)
+                continue
+
+            if first:
+                self.first_frame.emit(frame.t)
+                first = False
+
+            # Plain frames for the preview, every 3rd one to reduce overhead.
+            # Session info (elapsed time, mouse, protocol) lives in the session window.
+            if frame.index % 3 == 0:
+                self.frame_recorded.emit(frame.image)
+
+            # Consistent timing to reduce USB load variations
+            sleep_time = frame_time - (time.perf_counter() - loop_start)
+            self.msleep(int(sleep_time * 1000) if sleep_time > 0 else 1)
+
+    def cleanup(self) -> None:
+        """Close the camera and writer to prevent file corruption."""
+        video_path = self.camera.video_path
+        self.camera.close()
+        if video_path:
+            print(f"Video saved: {Path(video_path).name}")
+
+    def start_recording(self) -> None:
         self.running = True
         self.start()
-        
+
     def stop_recording(self):
         """Stop recording and ensure proper cleanup"""
         self.running = False
@@ -265,35 +176,56 @@ class RecordingVideoThread(QThread):
 
 
 class SerialThread(QThread):
+    """
+    Runs a protocol on an `ArduinoBoard`, optionally on a shared session clock.
+
+    Session mode (`clock` given): `start()` opens the board and emits `ready`;
+    the protocol then waits for `clock.start()` and runs until its duration
+    elapses, `stop()` is called or the clock stops.
+
+    Standalone mode (`clock=None`), used by the bench tools (fill tubes,
+    digital/analog tests): the protocol is simply run on the board until
+    `stop()`; those protocols know nothing about the clock.
+
+    The board is always closed when the thread ends. Qt's built-in
+    `finished` signal marks the end of the run.
+    """
+
+    ready = pyqtSignal()  # board is open (session mode: waiting for the clock)
+    error_occurred = pyqtSignal(str)
 
     def __init__(
             self,
-            com_port: str,
-            protocol
+            board: ArduinoBoard,
+            protocol,
+            clock: Optional[SessionClock] = None
     ) -> None:
 
         super().__init__()
-        self.com_port = com_port
+        self.board = board
         self.protocol = protocol
-
-        self.ser = None
+        self.clock = clock
 
     def run(self):
 
-        if not self.ser:
-            self.ser = serial.Serial(
-                self.com_port,
-                baudrate=9600,
-                write_timeout=10)
+        try:
+            self.board.open()
+        except Exception as e:
+            self.error_occurred.emit(f"Cannot open Arduino board: {e}")
+            return
 
-            if not self.ser.is_open:
-                self.ser.open()
-
-        self.protocol.run(self.ser)
+        try:
+            self.ready.emit()
+            if self.clock is None:
+                self.protocol.run(self.board)
+            else:
+                self.protocol.run(self.board, self.clock)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+        finally:
+            # The runner does not close the connection itself
+            self.board.close()
 
     def stop(self):
-
-        if self.ser and self.ser.is_open:
-            self.protocol.stop()
-            self.ser.close()
-            self.ser = None
+        """Ask the protocol to stop; run() closes the board on its way out."""
+        self.protocol.request_stop()
