@@ -2,9 +2,10 @@
     @author: dcupolillo """
 
 import cv2
+from typing import Optional
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
-    QDialog, QGridLayout, QLabel, QPushButton, QComboBox, QMessageBox
+    QDialog, QGridLayout, QLabel, QPushButton, QComboBox
 )
 from PyQt5.QtCore import pyqtSignal
 
@@ -16,6 +17,9 @@ class SelectCameraDialog(QDialog):
     """
 
     camera_selected = pyqtSignal(int)
+    camera_disabled = pyqtSignal()  # "No camera" was chosen
+
+    NO_CAMERA_LABEL = 'No camera (no video)'
 
     def __init__(self) -> None:
         super().__init__()
@@ -69,48 +73,31 @@ class SelectCameraDialog(QDialog):
                 cap.release()
         
         if not available_cameras:
-            self.camera_combo.addItem("No cameras found")
-            self.ok_button.setEnabled(False)
+            print("No cameras found")
         else:
             for cam_index, cam_info in available_cameras:
-                self.camera_combo.addItem(cam_info)
-            
+                self.camera_combo.addItem(cam_info, cam_index)
+
             # Default to Camera 0 (first camera found)
             for i, (cam_index, cam_info) in enumerate(available_cameras):
                 if cam_index == 0:
                     self.camera_combo.setCurrentIndex(i)
                     break
 
-    def get_selected_camera_index(self) -> int:
-        """Extract camera index from selected text."""
-        current_text = self.camera_combo.currentText()
-        
-        # Find the camera in our available cameras list to get the index
-        current_index = self.camera_combo.currentIndex()
-        if current_index >= 0:
-            # Re-scan to get the actual camera index (since we store it during population)
-            camera_count = 0
-            for i in range(6):
-                cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-                if not cap.isOpened():
-                    cap = cv2.VideoCapture(i)
-                
-                if cap.isOpened():
-                    ret, frame = cap.read()
-                    if ret and frame is not None:
-                        if camera_count == current_index:
-                            cap.release()
-                            return i
-                        camera_count += 1
-                    cap.release()
-        
-        return None
+        # Always available: the session can run without video
+        self.camera_combo.addItem(self.NO_CAMERA_LABEL, None)
+        if not available_cameras:
+            self.camera_combo.setCurrentIndex(0)
+
+    def get_selected_camera_index(self) -> Optional[int]:
+        """Camera index of the selected entry, or None for "No camera"."""
+        return self.camera_combo.currentData()
 
     def get_camera_device(self) -> None:
         """Get selected camera device and emit signal."""
         camera_index = self.get_selected_camera_index()
-        if camera_index is not None:
-            self.camera_selected.emit(camera_index)
-            self.accept()
+        if camera_index is None:
+            self.camera_disabled.emit()
         else:
-            QMessageBox.warning(self, "Selection Error", "Please select a valid camera device.")
+            self.camera_selected.emit(camera_index)
+        self.accept()

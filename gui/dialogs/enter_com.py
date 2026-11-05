@@ -16,8 +16,18 @@ class EnterCOMDialog(QDialog):
     """
 
     com_port = pyqtSignal(str)
+    arduino_disabled = pyqtSignal()  # "No Arduino (dry run)" was chosen
 
-    def __init__(self) -> None:
+    NO_ARDUINO_LABEL = 'None'
+
+    def __init__(self, allow_none: bool = False) -> None:
+        """
+        Parameters
+        ----------
+        allow_none: bool
+            Offer a "No Arduino" choice. Only meaningful for recording
+            sessions: the bench tests need a real port.
+        """
         super().__init__()
 
         self.setWindowTitle('COM ports')
@@ -31,10 +41,13 @@ class EnterCOMDialog(QDialog):
         default_index = 0
 
         for i, port in enumerate(serial.tools.list_ports.comports()):
-            self.com.addItem(f"{port.device} - {port.description}")
+            self.com.addItem(f"{port.device} - {port.description}", port.device)
 
             if "Arduino" in port.description:
                 default_index = i
+
+        if allow_none:
+            self.com.addItem(self.NO_ARDUINO_LABEL, None)
 
         self.com.setCurrentIndex(default_index)
 
@@ -42,6 +55,7 @@ class EnterCOMDialog(QDialog):
 
         self.ok_button = QPushButton('Ok')
         self.ok_button.clicked.connect(self.getcom_port)
+        self.ok_button.setEnabled(self.com.count() > 0)
         self.layout.addWidget(self.ok_button, 1, 1)
 
         self.cancel_button = QPushButton('Cancel')
@@ -50,6 +64,9 @@ class EnterCOMDialog(QDialog):
 
     def getcom_port(self) -> None:
         """Get selected COM port and emit signal."""
-        selected_port = self.com.currentText().split(' - ')[0]
-        self.com_port.emit(selected_port)
+        selected_port = self.com.currentData()
+        if selected_port is None:
+            self.arduino_disabled.emit()
+        else:
+            self.com_port.emit(selected_port)
         self.accept()
