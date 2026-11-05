@@ -10,5 +10,8 @@ dependencies:
   - pyserial
   - pip
   - pip:
+      - imageio
+      - imageio-ffmpeg
+      - keyboard
       - pyqt5
       - pyqt5-tools

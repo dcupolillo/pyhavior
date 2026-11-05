@@ -9,10 +9,13 @@ description = "Python tools to control a conditioning cage and record animal beh
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "imageio",
+    "imageio-ffmpeg",
+    "keyboard",
     "numpy",
     "opencv-python",
     "PyQt5",
-    "pyserial",
+    "pyserial"
 ]
 
 [tool.setuptools]
