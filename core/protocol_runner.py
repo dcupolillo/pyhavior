@@ -170,7 +170,8 @@ class ProtocolRunner:
             Serial message bytes or None if unknown device/action
         """
 
-        if device not in ['tone', 'shock', 'pump', 'buzzer', 'white_noise']:
+        if device not in [
+                'tone', 'shock', 'pump', 'buzzer', 'white_noise', 'green_led']:
             return None
         
         if action not in ['ON', 'OFF']:
@@ -196,6 +197,10 @@ class ProtocolRunner:
             'white_noise': {
                 'ON': self.messages.white_noise_on,
                 'OFF': self.messages.white_noise_off
+            },
+            'green_led': {
+                'ON': self.messages.greenLED_on,
+                'OFF': self.messages.greenLED_off
             }
         }
         
