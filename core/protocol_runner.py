@@ -1,13 +1,8 @@
-""" 
-Generic Protocol Runner - executes protocols from sequence files
-Created on October 3, 2025
-@author: dcupolillo 
-"""
 import sys
 import json
 import time
 from pathlib import Path
-from serial import Serial
+from pyhavior.core.clock import SessionClock
 from pyhavior.core.serial_messages import SerialMessages
 
 
@@ -35,14 +30,15 @@ class ProtocolRunner:
         self.sequence_file = sequence_file
         self.protocol_data = {}
         self.sequence = []
-        self.duration = 300
-        self.protocol_name = "Unknown Protocol"
+        self.duration = 300                     # Placeholder duration until loaded from sequence file
+        self.protocol_name = "Unknown Protocol" # Placeholder until loaded from sequence file
         
         # Serial communication
         self.messages = SerialMessages()
         self.ser = None
         self.running = False
         self.stop_requested = False
+        self.event_log = []  # one dict per fired event (scheduled/actual time)
         
         if sequence_file:
             self.load_sequence(sequence_file)
@@ -87,10 +83,32 @@ class ProtocolRunner:
             
             # Extract protocol information
             self.protocol_name = self.protocol_data.get('protocol_name', 'Unknown')
-            self.duration = self.protocol_data.get('duration', 300)
+
+            if 'duration' not in self.protocol_data:
+                raise KeyError(
+                    f"No 'duration' field found in protocol data "
+                    f"({sequence_path.name})")
+
+            try:
+                self.duration = float(self.protocol_data['duration'])
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"'duration' must be a number, got "
+                    f"{self.protocol_data['duration']!r}")
+
+            if self.duration <= 0:
+                raise ValueError(
+                    f"'duration' must be positive, got {self.duration}")
             
             # Build sequence from JSON data
             self._build_sequence_from_data()
+
+            late_events = [e for e in self.sequence if e[0] >= self.duration]
+            if late_events:
+                print(
+                    f"Warning: {len(late_events)} event(s) in "
+                    f"'{self.protocol_name}' are scheduled at or after the "
+                    f"duration ({self.duration}s) and will never fire")
             
             print(f"Loaded protocol: {self.protocol_name}")
             print(f"Duration: {self.duration}s")
@@ -183,19 +201,42 @@ class ProtocolRunner:
         
         return device_mapping.get(device, {}).get(action)
 
-    def run(self, ser: Serial) -> None:
+    def run(
+            self,
+            ser,
+            clock: SessionClock = None
+    ) -> None:
         """
         Execute the loaded protocol sequence.
-        
+
+        Event times are relative to the clock's t0. The run ends when the
+        duration elapses, `request_stop()` is called or the clock is stopped.
+        The caller owns `ser` and is responsible for closing it.
+
         Args:
-            ser: Serial connection to Arduino
+            ser: ArduinoBoard (or any object with `write`)
+            clock: shared SessionClock. If the clock has not started yet,
+                this waits for it. If None, a private clock is started now.
         """
-        if not self.sequence:
-            print("No sequence loaded. Cannot run protocol.")
+        # An empty sequence is valid (e.g. habituation): it still runs
+        # until the duration elapses, with nothing to send.
+        if not self.protocol_data:
+            print("No protocol loaded. Cannot run protocol.")
             return
             
         self.ser = ser
-        start_time = time.time()
+
+        if clock is None:
+            clock = SessionClock()
+            clock.start()
+
+        while not clock.started:
+            if clock.stopped or self.stop_requested:
+                return
+            clock.wait_for_start(0.05)
+
+        self.running = True
+        self.event_log = []
         
         # Track which sequence events have been fired
         fired = [False] * len(self.sequence)
@@ -203,17 +244,23 @@ class ProtocolRunner:
         print(f"Starting protocol: {self.protocol_name}")
         print(f"Total duration: {self.duration}s")
 
-        while (time.time() - start_time < self.duration and
-               not self.stop_requested):
+        while (clock.now() < self.duration and
+               not self.stop_requested and
+               not clock.stopped):
 
-            now = time.time() - start_time
+            now = clock.now()
 
             for i, (event_time, message, _, __, description) in enumerate(self.sequence):
                 if not fired[i] and now >= event_time:
                     # Fire the action once
                     try:
                         if self.ser and message:
+                            fired_at = clock.now()
                             self.ser.write(message)
+                            self.event_log.append({
+                                'scheduled': event_time,
+                                'actual': fired_at,
+                                'description': description})
                             print(
                                 f"{description} - "
                                 f"[{time.strftime('%H:%M:%S', time.localtime())}]")
@@ -224,25 +271,16 @@ class ProtocolRunner:
                     finally:
                         fired[i] = True
 
-            time.sleep(0.01)  # Small delay to reduce CPU usage
+            # Interruptible sleep: wakes up immediately if the clock stops
+            clock.wait_for_stop(0.005)
 
         print(f"Protocol completed: {self.protocol_name}")
         self.running = False
         
-        if self.ser and getattr(self.ser, 'is_open', False):
-            try:
-                self.ser.close()
-            except Exception:
-                pass
-
     def stop(self) -> None:
-        """Stop the protocol execution"""
+        """Stop the protocol execution (the caller closes the board)."""
         self.running = False
-        if self.ser and self.ser.is_open:
-            try:
-                self.ser.close()
-            except Exception:
-                pass
+        self.request_stop()
 
     def request_stop(self) -> None:
         """Request protocol to stop at next opportunity"""
