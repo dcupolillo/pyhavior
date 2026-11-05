@@ -23,6 +23,60 @@ class SettingsFrame(QFrame):
 
         self.record_frame = record_frame
 
+    @property
+    def record_frame(self) -> QFrame:
+        return self._record_frame
+
+    @record_frame.setter
+    def record_frame(self, frame: QFrame) -> None:
+        """The record frame is attached after construction (see gui.py)."""
+
+        self._record_frame = frame
+        if frame is not None:
+            frame.session_active.connect(self.set_session_active)
+            frame.hardware_busy = self.busy_reason
+
+    def _session_buttons(self) -> list:
+        """Buttons that must not be used while a session owns the devices."""
+
+        return [
+            self.setting_button,
+            self.com_button,
+            self.camera_button,
+            self.check_video_button,
+            self.fill_tubes_button,
+            self.test_digital_outputs_button,
+            self.test_analog_inputs_button,
+        ]
+
+    def set_session_active(self, active: bool) -> None:
+        for button in self._session_buttons():
+            button.setEnabled(not active)
+
+    @staticmethod
+    def _is_running(thread) -> bool:
+        return bool(thread) and thread.isRunning()
+
+    def preview_active(self) -> bool:
+        return self._is_running(self.check_video_button.video_thread)
+
+    def busy_reason(self):
+        """Why a recording cannot start right now, or None if it can."""
+
+        if self.preview_active() and self.record_frame.camera_device is not None:
+            return "The camera preview is open. Close it before recording."
+
+        bench_tools = (
+            (self.fill_tubes_button, 'pump_thread', 'Fill tubes'),
+            (self.test_digital_outputs_button, 'DO_thread', 'The digital output test'),
+            (self.test_analog_inputs_button, 'AI_thread', 'The analog input test'))
+
+        for button, attribute, name in bench_tools:
+            if self._is_running(getattr(button, attribute, None)):
+                return f"{name} is running and holds the Arduino. Stop it first."
+
+        return None
+
     def init_attributes(self) -> None:
         self.all_entries_filled = False
 
@@ -78,15 +132,26 @@ class SettingsFrame(QFrame):
         info_dialog.exec_()
 
     def set_com(self) -> None:
-        com_dialog = EnterCOMDialog()
+        com_dialog = EnterCOMDialog(allow_none=True)
         com_dialog.com_port.connect(
             self.record_frame.handle_com_port)
+        com_dialog.arduino_disabled.connect(
+            self.record_frame.handle_no_arduino)
         com_dialog.exec_()
 
     def select_camera(self) -> None:
+        if self.preview_active():
+            QMessageBox.information(
+                self,
+                'Camera in use',
+                'Close the video preview before changing the camera.')
+            return
+
         camera_dialog = SelectCameraDialog()
         camera_dialog.camera_selected.connect(
             self.record_frame.handle_camera_selection)
+        camera_dialog.camera_disabled.connect(
+            self.record_frame.handle_no_camera)
         camera_dialog.exec_()
 
     def open_protocol_visualizer(self) -> None:
