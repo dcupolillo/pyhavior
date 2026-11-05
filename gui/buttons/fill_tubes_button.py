@@ -3,6 +3,8 @@
 
 from PyQt5.QtWidgets import QPushButton
 
+from pyhavior.core.arduino import ArduinoBoard
+from pyhavior.core.clock import SessionClock
 from pyhavior.core.test_utils import FillTubes
 from pyhavior.core.threads import SerialThread
 from pyhavior.gui.dialogs import EnterCOMDialog
@@ -30,7 +32,7 @@ class FillTubesButton(QPushButton):
             self.setText('Press to Stop')
             if not self.pump_thread or not self.pump_thread.isRunning():
                 self.pump_thread = SerialThread(
-                    self.com_port,
+                    ArduinoBoard(self.com_port, SessionClock()),
                     FillTubes())
                 self.pump_thread.start()
         else:

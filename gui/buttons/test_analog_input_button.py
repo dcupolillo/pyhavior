@@ -3,6 +3,8 @@
 
 from PyQt5.QtWidgets import QPushButton
 
+from pyhavior.core.arduino import ArduinoBoard
+from pyhavior.core.clock import SessionClock
 from pyhavior.core.test_utils import TestAnalog
 from pyhavior.core.threads import SerialThread
 from pyhavior.gui.dialogs import EnterCOMDialog
@@ -26,7 +28,7 @@ class TestAIButton(QPushButton):
         if self.isChecked():
             self.setText('Press to Stop')
             self.AI_thread = SerialThread(
-                self.com_port,
+                ArduinoBoard(self.com_port, SessionClock()),
                 TestAnalog())
             self.AI_thread.start()
         else:

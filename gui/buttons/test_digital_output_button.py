@@ -3,6 +3,8 @@
 
 from PyQt5.QtWidgets import QPushButton
 
+from pyhavior.core.arduino import ArduinoBoard
+from pyhavior.core.clock import SessionClock
 from pyhavior.core.test_utils import TestDigitalOutput
 from pyhavior.core.threads import SerialThread
 from pyhavior.gui.dialogs import EnterCOMDialog, KeyActionDialog
@@ -31,7 +33,7 @@ class TestDOButton(QPushButton):
             self.setText('Press to Stop')
             if not self.DO_thread or not self.DO_thread.isRunning():
                 self.DO_thread = SerialThread(
-                    self.com_port,
+                    ArduinoBoard(self.com_port, SessionClock()),
                     TestDigitalOutput())
                 self.DO_thread.start()
                 self.show_key_actions_dialog()
